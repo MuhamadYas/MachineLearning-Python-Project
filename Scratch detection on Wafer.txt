@@ -1,0 +1,300 @@
+import pandas as pd
+import zipfile
+from datetime import datetime
+
+
+def plot_wafer_maps(wafer_df_list, figsize, labels = True):
+    """
+    plot wafer maps for list of df of wafers
+
+    :param wafer_df_list: list, The list of df's of the wafers
+    :param figsize: int, the size of the figsize height 
+    :param labels: bool, Whether to show the layer of labels (based on column 'IsScratchDie')
+    
+    :return: None
+    """
+    def plot_wafer_map(wafer_df, ax, map_type):
+        wafer_size = len(wafer_df)
+        s = 2**17/(wafer_size)
+        if map_type == 'Label':
+            mes = 'Scratch Wafer' if (wafer_df['IsScratchDie'] == True).sum()>0 else 'Non-Scratch Wafer'
+        else:
+            mes = 'Yield: ' + str(round((wafer_df['IsGoodDie']).sum()/(wafer_df['IsGoodDie']).count(), 2)) 
+        
+        ax.set_title(f'{map_type} | Wafer Name: {wafer_df["WaferName"].iloc[0]}, \nSum: {len(wafer_df)} dies. {mes}', fontsize=20)
+        ax.scatter(wafer_df['DieX'], wafer_df['DieY'], color = 'green', marker='s', s = s)
+
+        bad_bins = wafer_df.loc[wafer_df['IsGoodDie'] == False]
+        ax.scatter(bad_bins['DieX'], bad_bins['DieY'], color = 'red', marker='s', s = s)
+        
+        if map_type == 'Label':
+            scratch_bins = wafer_df.loc[(wafer_df['IsScratchDie'] == True) & (wafer_df['IsGoodDie'] == False)]
+            ax.scatter(scratch_bins['DieX'], scratch_bins['DieY'], color = 'blue', marker='s', s = s)
+
+            ink_bins = wafer_df.loc[(wafer_df['IsScratchDie'] == True) & (wafer_df['IsGoodDie'] == True)]
+            ax.scatter(ink_bins['DieX'], ink_bins['DieY'], color = 'yellow', marker='s', s = s)
+
+            ax.legend(['Good Die', 'Bad Die', 'Scratch Die', 'Ink Die'], fontsize=8)
+        else:
+            ax.legend(['Good Die', 'Bad Die'], fontsize=8)
+
+        ax.axes.get_xaxis().set_visible(False)
+        ax.axes.get_yaxis().set_visible(False) 
+    
+    import numpy as np
+    import matplotlib.pyplot as plt
+    
+    if labels:
+        fig, ax = plt.subplots(2, len(wafer_df_list), figsize=(figsize*len(wafer_df_list), figsize*2))
+        for idx1, wafer_df in enumerate(wafer_df_list):
+            for idx2, map_type in enumerate(['Input', 'Label']):
+                plot_wafer_map(wafer_df, ax[idx2][idx1], map_type)
+    else:
+        fig, ax = plt.subplots(1, len(wafer_df_list), figsize=(figsize*len(wafer_df_list), figsize))
+        for idx, wafer_df in enumerate(wafer_df_list):
+            plot_wafer_map(wafer_df, ax[idx], 'Input')
+
+    plt.show()
+
+
+
+n_samples = 4
+list_sample_train = [df_wafers.groupby('WaferName').get_group(group) for group in df_wafers['WaferName'].value_counts().sample(n_samples, random_state=20).index]
+plot_wafer_maps(list_sample_train, figsize = 8, labels = True)
+
+
+
+
+
+
+
+
+
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from tensorflow.keras import layers, Model
+from tensorflow.keras.callbacks import ModelCheckpoint
+import cv2
+import matplotlib.pyplot as plt
+
+# ====== GLOBAL PADDING SIZE ======
+MAX_WAFER_SIZE = (71, 71)  # Adjust if needed (e.g., max DieY, DieX across dataset)
+
+# ========== Preprocessing ==========
+def preprocess_wafer_dual(df, wafer_name):
+    wafer = df[df['WaferName'] == wafer_name].copy()
+    if wafer.empty:
+        return None, None, None, None
+
+    max_x = wafer['DieX'].max() + 1
+    max_y = wafer['DieY'].max() + 1
+
+    padded_h, padded_w = MAX_WAFER_SIZE
+    good_img = np.full((padded_h, padded_w), -1, dtype=np.float32)
+    scratch_img = np.full((padded_h, padded_w), -1, dtype=np.float32)
+    is_good = np.zeros((padded_h, padded_w), dtype=np.uint8)
+
+    # Check if the column exists
+    has_scratch_col = 'IsScratchDie' in wafer.columns
+
+    for _, row in wafer.iterrows():
+        x = row['DieX']
+        y = row['DieY']
+        good_img[y, x] = row['IsGoodDie']
+        scratch_img[y, x] = row['IsScratchDie'] if has_scratch_col else 0
+        is_good[y, x] = row['IsGoodDie']
+
+    # Positional channels
+    h, w = MAX_WAFER_SIZE
+    x_coords = np.tile(np.arange(w), (h, 1)) / w
+    y_coords = np.tile(np.arange(h)[:, None], (1, w)) / h
+
+    input_tensor = np.stack([
+        good_img,
+        x_coords,
+        y_coords
+    ], axis=-1)
+
+    return input_tensor, scratch_img[..., np.newaxis], (max_y, max_x), is_good
+
+
+
+def filter_by_yield(df, threshold=0.900000):
+    df = df.copy()
+    df['IsGoodDie'] = df['IsGoodDie'].astype(str).map({'True': 1, 'False': 0}).fillna(0).astype(int)
+
+    wafer_groups = df.groupby('WaferName')
+    valid_wafers = []
+    min_yield = 1.0
+
+    for name, group in wafer_groups:
+        yield_ratio = group['IsGoodDie'].sum() / len(group)
+        min_yield = min(min_yield, yield_ratio)
+        if yield_ratio >= threshold:
+            valid_wafers.append(group)
+
+    print(f"Yield filtering: {len(valid_wafers)} wafers kept out of {len(wafer_groups)}")
+    print(f"Minimum yield observed: {min_yield:.4f}")
+    
+    return pd.concat(valid_wafers) if valid_wafers else pd.DataFrame()
+
+
+
+# ========== Model ==========
+
+def build_model(input_shape):
+    inputs = layers.Input(shape=input_shape)
+
+    x = layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)
+    x = layers.Conv2D(64, 3, padding='same', activation='relu')(x)
+
+    # Dilated convolutions
+    x = layers.Conv2D(64, 3, dilation_rate=2, padding='same', activation='relu')(x)
+    x = layers.Conv2D(64, 3, dilation_rate=4, padding='same', activation='relu')(x)
+
+    # Continue stacking
+    x = layers.Conv2D(64, 3, padding='same', activation='relu')(x)
+    x = layers.Conv2D(32, 3, padding='same', activation='relu')(x)
+
+    outputs = layers.Conv2D(1, 1, activation='sigmoid')(x)
+    return Model(inputs, outputs)
+
+
+def masked_loss(y_true, y_pred):
+    mask = tf.cast(tf.not_equal(y_true, -1), tf.float32)
+    loss = tf.keras.losses.binary_crossentropy(y_true * mask, y_pred * mask)
+    return tf.reduce_sum(loss) / (tf.reduce_sum(mask) + 1e-7)
+
+# ========== Training ==========
+
+def train_padded_model(train_csv, sample_fraction=0.2):
+    df = pd.read_csv(train_csv)
+    wafer_names = df['WaferName'].unique()
+    
+    #Sample 20% of the wafers randomly
+    sampled_wafer_names = np.random.choice(wafer_names, 
+                                           size=int(len(wafer_names) * sample_fraction), 
+                                           replace=False)
+
+    X = []
+    Y = []
+
+    for name in sampled_wafer_names:
+        # Only one call to the dual-version
+        img, scratch_img, _, _ = preprocess_wafer_dual(df, name)
+        if img is None or scratch_img is None:
+            continue
+        X.append(img)
+        Y.append(scratch_img)
+
+    X = np.stack(X)
+    Y = np.stack(Y)
+
+    model = build_model(input_shape=X.shape[1:])
+    model.compile(optimizer='adam', loss=masked_loss)
+
+    print(f"📚 Training on {len(sampled_wafer_names)} wafers ({sample_fraction*100:.0f}%)...")
+    model.fit(X, Y, epochs=30, batch_size=4, verbose=1)
+
+    model.save('scratch_detector.keras')
+    print("✅ Model saved to scratch_detector.keras")
+    return model
+
+
+
+# ========== Prediction ==========
+
+def predict_on_test(model, test_csv):
+    df = pd.read_csv(test_csv)
+    wafer_names = df['WaferName'].unique()
+    all_predictions = []
+
+    for name in wafer_names:
+        img, _, _, is_good = preprocess_wafer_dual(df, name)
+
+        if img is None:
+            continue
+
+        # Predict scratch mask
+        pred = model.predict(img[np.newaxis, ...])[0, ..., 0] > 0.5
+        print(f"{name} | pred stats: min={pred.min():.4f}, max={pred.max():.4f}, mean={pred.mean():.4f}")
+        wafer = df[df['WaferName'] == name].copy()
+        # Apply inked die expansion
+        coords=wafer[['DieX','DieY']].values
+        pred = apply_inked_die_expansion(pred, is_good, coords)
+
+       
+        records = []
+
+        for _, row in wafer.iterrows():
+            x = row['DieX']
+            y = row['DieY']
+            is_good_die = int(row['IsGoodDie'])
+
+            scratch = int(pred[y, x]) if is_good_die == 0 else int(pred[y, x])  # allow inked prediction
+
+            records.append({
+                'WaferName': name,
+                'DieX': x,
+                'DieY': y,
+                'IsGoodDie': is_good_die,
+                'IsScratchDie': scratch
+            })
+
+        all_predictions.append(pd.DataFrame(records))
+
+    result = pd.concat(all_predictions)
+    result.to_csv('cnn_predictions_padded.csv', index=False)
+    print("✅ Predictions saved to cnn_predictions_padded.csv")
+    return result
+
+
+# Mark inked dies after scratch prediction on bad dies
+
+def apply_inked_die_expansion(pred_mask, is_good_mask, coords, kernel_size=1):
+    
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    dilated = cv2.dilate(pred_mask.astype(np.uint8), kernel, iterations=1)
+    updated = pred_mask.copy()
+
+    for x, y in coords:
+        if is_good_mask[y, x] == 1 and dilated[y, x] == 1:
+            updated[y, x] = 1  # Mark this good die as scratched (inked)
+
+    return updated
+
+
+# ========== Main Runner ==========
+
+def run_padded_pipeline():
+    print("📊 Filtering low-yield training wafers...")
+    df_train = pd.read_csv('wafers_train.csv')
+    df_train = filter_by_yield(df_train, threshold=0.9)
+    df_train.to_csv('wafers_train_filtered.csv', index=False)
+
+    print("📥 Step 1: Training the model...")
+    model = train_padded_model('wafers_train_filtered.csv')
+
+    print("📊 Filtering low-yield test wafers...")
+    df_test = pd.read_csv('wafers_test.csv')
+    df_test = filter_by_yield(df_test, threshold=0.9)
+    df_test.to_csv('wafers_test_filtered.csv', index=False)
+
+    print("📤 Step 2: Predicting test data...")
+    scratches = predict_on_test(model, 'wafers_test_filtered.csv')
+
+    print("🎯 Step 3: Visualizing results...")
+    sample_names = scratches["WaferName"].drop_duplicates().sample(6, random_state=42)
+    sampled_wafers = [scratches[scratches["WaferName"] == name] for name in sample_names]
+    plot_wafer_maps(sampled_wafers, figsize=6)
+    print("✅ Done!")
+
+# ========== Run ==========
+
+if __name__ == '__main__':
+    run_padded_pipeline()
+
+
+
+
