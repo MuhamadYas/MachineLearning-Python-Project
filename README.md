@@ -1,5 +1,5 @@
-## Scratch Detection on Wafer Maps
-# Overview
+# Scratch Detection on Wafer Maps
+## Overview
 This repository contains a solution to the Scratch Detection Assignment from NI’s Data Science team. The task is to build an automated model that can flag dies on a semiconductor wafer that belong to a physical scratch. Scratches appear as elongated clusters of faulty dies and may include a few “good” dies that should still be discarded (inked). Identifying these patterns manually is time‑consuming and error‑prone, so the objective is to train a machine‑learning model to predict scratch dies for new wafer maps.
 
 The dataset is provided as a logical wafer map rather than an image. Each row describes a single die using the following fields:
@@ -12,7 +12,7 @@ The dataset is provided as a logical wafer map rather than an image. Each row de
 
 Our goal is to learn from labelled training wafers and predict the IsScratchDie label for each die in an unseen test set. The business drivers for this project include automation of a costly manual process, improving overall quality and yield, and enabling wafer‑level scratch classification. Low‑yield wafers (with many faulty dies) are excluded from scratch detection because random clusters may otherwise be mistaken for scratches.
 
-# Solution Approach
+## Solution Approach
 The provided notebook implements an end‑to‑end pipeline using a convolutional neural network (CNN) to segment scratch regions on a wafer map. Below is a high‑level overview of the steps taken:
 
 1. Data Pre‑processing:
